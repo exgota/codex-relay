@@ -87,7 +87,7 @@ Any process running as the user can drive Codex through this socket, with whatev
 
 ## After an app update
 
-1. Run `scripts/codex_relay.py doctor`. It reads the app version, compares the bundle's method table with `METHOD_VERSIONS`, checks the `codex` binary and `CODEX_HOME`, and does an IPC handshake.
+1. Run `python3 scripts/codex_relay.py doctor`. It reads the app version, compares the bundle's method table with `METHOD_VERSIONS`, checks the `codex` binary and `CODEX_HOME`, and does an IPC handshake.
 2. If the protocol check fails, re-derive it. `app.asar` is a Pickle header (4 × uint32 little-endian) followed by a JSON file table, and file bytes live at `8 + header_size + offset`. Extract the `.js` files containing `thread-follower`:
    - `.vite/build/src-*.js`: the router, the frame reader and the `nb` version table
    - `.vite/build/main-*.js` and `webview/assets/app-initial-*.js`: the owner's `handleThreadFollowerRequest` switch (it takes `case` + a backtick-quoted method name) and the follower-side request builders, which give the exact params

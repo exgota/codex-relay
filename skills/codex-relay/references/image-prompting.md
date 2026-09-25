@@ -48,7 +48,15 @@ Observed in the author's own image history (about 180 sessions): which prompts w
 After the turn ends, list the newest files in `$CODEX_HOME/generated_images/<thread id>/`. To see what Codex actually sent, read the `revised_prompt` fields from the thread's rollout:
 
 ```bash
-grep -o '"revised_prompt":"[^"]*"' "${CODEX_HOME:-$HOME/.codex}"/sessions/*/*/*/*<thread id>.jsonl
+python3 - <thread id> <<'PY'
+import glob, json, os, sys
+home = os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex")
+for path in glob.glob(f"{home}/sessions/*/*/*/*{sys.argv[1]}.jsonl"):
+    for line in open(path):
+        payload = json.loads(line).get("payload") or {}
+        if payload.get("type") == "image_generation_call":
+            print(payload.get("revised_prompt"), end="\n\n")
+PY
 ```
 
 To use an image in an artifact or page, copy the file into your working folder. The generated-images folder grows large and may get cleaned up.

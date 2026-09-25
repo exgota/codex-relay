@@ -117,7 +117,10 @@ def app_version(app_path):
 def codex_binary():
     override = os.environ.get("CODEX_RELAY_CODEX_BIN")
     if override:
-        return override
+        if os.path.isfile(override) and os.access(override, os.X_OK):
+            return override
+        raise RelayError(f"CODEX_RELAY_CODEX_BIN points to {override}, which is not an executable file",
+                         kind="app_unavailable", exit_code=EXIT_APP)
     on_path = shutil.which("codex")
     if on_path:
         return on_path
@@ -181,7 +184,11 @@ def check_protocol_compatibility(force=False):
     if not force and cache.get("key") == key:
         verdict = cache["verdict"]
     else:
-        table = bundle_method_versions(app)
+        try:
+            table = bundle_method_versions(app)
+        except OSError as error:
+            raise RelayError(f"cannot read the ChatGPT app bundle to check its protocol: {error}",
+                             kind="app_unavailable", exit_code=EXIT_APP)
         if table is None:
             verdict = {"compatible": False, "reason": "method-version table not found in app.asar"}
         else:
@@ -690,10 +697,13 @@ def start_turn(connection, owner, task, record, text, image_paths, model=None, e
     requested = None
     if model or effort:
         requested = apply_settings(connection, owner, task, record, before, model, effort)
+    elif record.get("pending_settings"):
+        requested = record["pending_settings"]  # set earlier with `settings`; checked on this turn
     turn_input = build_input(text, image_paths)
     offset = os.path.getsize(path)
     record["last_operation"] = {"kind": "start", "at": time.time(), "rollout_offset": offset,
-                                "prompt_sha256": text_digest(text), "outcome": "sent"}
+                                "prompt_sha256": text_digest(text), "outcome": "sent",
+                                "requested": requested}
     record["wait_cursor"] = offset
     save_record(record)
     timeout = float(os.environ.get("CODEX_RELAY_START_TIMEOUT_TEST") or 20)
@@ -729,6 +739,8 @@ def start_turn(connection, owner, task, record, text, image_paths, model=None, e
         record["stage"] = "ready"
     save_record(record)
     actual = verify_turn_settings(connection, owner, task, record, started, requested)
+    record.pop("pending_settings", None)
+    save_record(record)
     return {"task": task, "action": "started", "turn_id": started.turn_id, "model": actual["model"],
             "effort": actual["effort"], "outcome": record["last_operation"]["outcome"], "settings_verified": True}
 
@@ -1110,6 +1122,7 @@ def command_settings(arguments):
         snapshot = app_snapshot(connection, owner, task)
     finally:
         connection.close()
+    record["pending_settings"] = requested
     save_record(record)
     actual = summarize_snapshot(snapshot) if snapshot else {}
     confirmed = bool(snapshot) and all(actual.get(key) == value for key, value in requested.items() if value)
@@ -1118,6 +1131,20 @@ def command_settings(arguments):
                  "confirmed": confirmed,
                  "detail": "applies to the next turn; `send` verifies it again when that turn starts"},
                 EXIT_OK if confirmed else EXIT_FAILED)
+
+
+def late_settings_mismatch(record, tracker):
+    """Compare a turn whose settings were recorded late with what was requested for it."""
+    operation = record.get("last_operation") or {}
+    requested = operation.get("requested") or {}
+    if operation.get("kind") != "start" or not requested or not tracker.model:
+        return None
+    if operation.get("turn_id") and operation["turn_id"] != tracker.turn_id:
+        return None
+    actual = {"model": tracker.model, "effort": tracker.effort}
+    wrong = {key: {"requested": value, "actual": actual.get(key)} for key, value in requested.items()
+             if value and actual.get(key) != value}
+    return wrong or None
 
 
 def wait_loop(task, record, timeout, progress):
@@ -1170,10 +1197,14 @@ def wait_loop(task, record, timeout, progress):
         time.sleep(1)
     result = {"task": task, "state": "working" if state == "starting" else state, "turn_id": tracker.turn_id,
               "messages": [message[-2000:] for message in new_messages[-3:]],
+              "more_messages": max(0, len(new_messages) - 3),
               "last_activity_seconds": tracker.seconds_since_activity(), "model": tracker.model,
               "effort": tracker.effort}
     if state == "waiting_for_input":
         result["questions"] = tracker.pending_questions()
+    mismatch = late_settings_mismatch(record, tracker) if owned else None
+    if mismatch:
+        result["settings_mismatch"] = mismatch
     if state == "not_started":
         result["detail"] = "no turn appeared after the last start request; check `status` before resending"
     if state in ("completed", "failed"):
@@ -1196,6 +1227,17 @@ def command_status(arguments):
     task = validate_task(arguments.task)
     record = load_record(task)
     state, tracker = inspect(task, record, use_app=not arguments.rollout_only)
+    operation = (record or {}).get("last_operation") or {}
+    if operation.get("kind") == "start" and operation.get("outcome") in ("sent", "unconfirmed"):
+        pending = track_from(find_rollout(task, record), operation.get("rollout_offset", 0))
+        if pending.turn_id is None:
+            waited = time.time() - operation.get("at", time.time())
+            state.update(state="not_started" if waited > 45 else "starting",
+                         detail="the last start request has not produced a turn"
+                                + ("; it is safe to resend" if waited > 45 else " yet; check again shortly"))
+    mismatch = late_settings_mismatch(record or {}, tracker)
+    if mismatch:
+        state["settings_mismatch"] = mismatch
     state["controlled_by_this_session"] = bool(record and record.get("session") == current_session())
     state["last_operation"] = (record or {}).get("last_operation")
     return emit(state)
@@ -1289,9 +1331,9 @@ def command_notify(arguments):
         raise RelayError("`notify end` needs --outcome", kind="invalid_input", exit_code=EXIT_INVALID)
     message = NOTIFICATIONS[phase]
     script = f"display notification {json.dumps(message)} with title \"Codex relay\" sound name \"Glass\""
-    subprocess.run(["osascript", "-e", script], check=False)
+    posted = subprocess.run(["osascript", "-e", script], check=False, capture_output=True).returncode == 0
     focused = focus_terminal() if arguments.phase == "end" and not arguments.no_focus else None
-    return emit({"notified": message, "focused": focused})
+    return emit({"notified": message, "posted": posted, "focused": focused})
 
 
 def command_doctor(arguments):
@@ -1319,6 +1361,9 @@ def command_doctor(arguments):
         checks["codex_binary"] = codex_binary()
     except RelayError as error:
         problems.append(str(error))
+    sessions = os.path.join(codex_home(), "sessions")
+    if not os.path.isdir(sessions):
+        problems.append(f"no Codex sessions folder at {sessions}; is CODEX_HOME right?")
     checks["socket"] = socket_path()
     if checks["socket"]:
         try:
@@ -1328,7 +1373,7 @@ def command_doctor(arguments):
             problems.append(str(error))
     else:
         problems.append("the app is not running, or it uses a different CODEX_HOME")
-    checks["problems"] = problems
+    checks["problems"] = list(dict.fromkeys(problems))
     return emit(checks, EXIT_OK if not problems else EXIT_APP)
 
 

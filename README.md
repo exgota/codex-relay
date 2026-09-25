@@ -6,11 +6,11 @@ It suits jobs where Codex is the better tool: computer use, the app's browser wi
 
 ## What it does
 
-- **Starts tasks you can watch.** Each task is a Codex thread in the app. Claude starts it at the model and effort you asked for, then reads both back from the turn's own record. If they don't match, the relay stops the turn. If the record isn't written within 90 seconds, it reports `settings_verified: false` instead.
+- **Starts tasks you can watch.** Each task is a Codex thread in the app. Claude starts it at the model and effort you asked for, then reads both back from the turn's own record. If they don't match, the relay stops the turn. If the record isn't written within 90 seconds, it reports `settings_verified: false`, and later waits flag any mismatch as `settings_mismatch`.
 - **Uses bounded waits.** Each wait ends before Claude Code's tool time limit, picks up where the last one stopped, and returns only messages it hasn't returned before.
 - **Reports Codex's state:** working, waiting for your answer, waiting for your approval, done, interrupted, failed, or cut off. Questions and approvals always come back to you. The relay never answers them.
 - **Keeps starting and steering separate.** One command starts a turn and another changes a running turn, so a new brief can't slip into work that's already running.
-- **Controls only its own tasks.** It sends to, steers and stops only tasks this Claude session created or adopted. The skill tells Claude to adopt a task only when you name it. Reading any task's state is allowed.
+- **Controls only its own tasks.** It sends to, steers and stops only tasks this Claude session created or adopted. The skill tells Claude to adopt a task only when you name it. Reading any task's state is allowed. Outside Claude Code, all callers share one session unless you set `CODEX_RELAY_SESSION`.
 - **Tells you when control changes.** Claude posts a macOS notification when it takes over and another when it hands back. The second one also brings your terminal to the front.
 
 ## Requirements
@@ -27,7 +27,7 @@ It suits jobs where Codex is the better tool: computer use, the app's browser wi
 With the [skills CLI](https://github.com/vercel-labs/skills):
 
 ```bash
-npx skills add exgota/codex-relay -g
+npx skills add exgota/codex-relay -g --agent claude-code
 ```
 
 As a Claude Code plugin:
@@ -115,7 +115,7 @@ The protocol is undocumented. [`references/ipc-protocol.md`](skills/codex-relay/
 
 ## Testing
 
-Tested on macOS, on scratch tasks only. The protocol check passed on ChatGPT app versions 26.917.51856 and 26.917.71314, and the live checks below ran on 26.917.71314:
+Tested on macOS, on scratch tasks only. On a second Mac with ChatGPT app 26.917.51856 and no prior install, a fresh clone passed `doctor`, installed with the skills CLI, and ran a task end to end. The live checks below ran on app 26.917.71314:
 
 - a task from creation to a checked result
 - effort confirmed on new and existing tasks
