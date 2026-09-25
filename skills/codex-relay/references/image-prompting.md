@@ -2,7 +2,7 @@
 
 `$CODEX_HOME` below defaults to `~/.codex`.
 
-Codex has a built-in image tool (`image_gen`, backed by OpenAI's current GPT Image model). There's no CLI flag that calls it directly. It fires inside a model turn, so an image request is just a relay brief that asks Codex to generate. Codex saves every result to `$CODEX_HOME/generated_images/<thread id>/ig_<id>.png`, and the rollout records the exact prompt it sent as `revised_prompt` on an `image_generation_call` item.
+Codex has a built-in image tool (`image_gen`, backed by OpenAI's GPT Image model). There's no CLI flag that calls it directly. It fires inside a model turn, so an image request is just a relay brief that asks Codex to generate. Codex saves every result to `$CODEX_HOME/generated_images/<thread id>/ig_<id>.png`, and the rollout records the exact prompt it sent as `revised_prompt` on an `image_generation_call` item.
 
 Run image work as a relay task (`new`, or `send` to reuse a task) so the user can watch and pick variants in the app. Use headless `codex exec` only for a batch the user asked to run unwatched.
 
@@ -30,7 +30,7 @@ Avoid: <this genre's specific clichés, never "low quality">
 
 ## Rules that held up
 
-Observed in one user's image history (about 180 sessions): which prompts were reused or praised, and which were rejected. Counts show how many cases support each rule; treat them as field notes, not measurements.
+Observed in the author's own image history (about 180 sessions): which prompts were reused or praised, and which were rejected. Counts show how many cases support each rule; treat them as field notes, not measurements.
 
 1. **Cutouts go on a flat chroma key.** For sprites, icons and other assets that get background removal, use a perfectly flat `#FF00FF` or `#00FF00` background, and forbid that color, and anything close to it, in the subject. No shadows, gradients or floor. (2 praised outputs, reused in 10+ follow-up sessions.)
 2. **Every reference image gets a contract.** Refer to it by index, and say what to borrow and what not to copy. Never lump sources, edit targets and style references into one "inspiration" bundle. (Explicit guidance plus 1 fully worked, blind-judged example.)

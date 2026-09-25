@@ -33,7 +33,6 @@ import time
 import urllib.request
 import uuid
 
-RELAY_VERSION = "1.0.0"  # keep equal to metadata.version in ../SKILL.md
 REPOSITORY_URL = "https://github.com/exgota/codex-relay"
 LATEST_SKILL_URL = "https://raw.githubusercontent.com/exgota/codex-relay/main/skills/codex-relay/SKILL.md"
 UPDATE_CHECK_INTERVAL_SECONDS = 24 * 60 * 60
@@ -203,6 +202,7 @@ class IpcConnection:
     """A client of the app's IPC router: 4-byte little-endian length + UTF-8 JSON."""
 
     def __init__(self):
+        check_protocol_compatibility()  # cached per app build, so this is cheap after the first run
         path = socket_path()
         if not path:
             raise RelayError(f"the ChatGPT app is not running (no IPC socket under {codex_home()})",
@@ -736,60 +736,83 @@ def start_turn(connection, owner, task, record, text, image_paths, model=None, e
 # ---------- update check (notify and ask; never installs anything) ----------
 
 def version_tuple(text):
-    match = re.search(r"^\s+version:\s*[\"']?(\d+(?:\.\d+)*)", text or "", re.M)
-    return tuple(int(part) for part in match.group(1).split(".")) if match else None
+    """metadata.version from a SKILL.md frontmatter, padded to three parts."""
+    match = re.search(r"^[ \t]+version:[ \t]*[\"']?([0-9]+(?:\.[0-9]+){0,3})", text or "", re.M)
+    if not match:
+        return None
+    parts = [int(part) for part in match.group(1).split(".")]
+    return tuple(parts + [0] * (3 - len(parts)))
 
 
 def local_version():
     try:
         skill_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "SKILL.md")
-        return version_tuple(open(skill_file, encoding="utf-8").read())
-    except OSError:
+        with open(skill_file, encoding="utf-8") as handle:
+            return version_tuple(handle.read())
+    except (OSError, ValueError):
         return None
+
+
+def update_checks_disabled():
+    return (os.environ.get("CODEX_RELAY_NO_UPDATE_CHECK") or "").strip().lower() not in ("", "0", "false", "no")
+
+
+def fetch_latest_version(url, deadline_seconds=5):
+    """Read at most 64 KB within an overall deadline, not just a per-read timeout."""
+    deadline = time.time() + deadline_seconds
+    with urllib.request.urlopen(url, timeout=3) as response:
+        data = b""
+        while len(data) < 65536 and time.time() < deadline:
+            # read1 returns what has arrived, so a slow trickle can't outlast the deadline
+            chunk = response.read1(4096) if hasattr(response, "read1") else response.read(4096)
+            if not chunk:
+                break
+            data += chunk
+    found = version_tuple(data.decode("utf-8", "replace"))
+    return ".".join(map(str, found)) if found else None
 
 
 def update_available():
     """At most once a day, compare this copy's version with the latest on GitHub. Any
     failure is silent: the check must never break or noticeably slow a relay command."""
-    if os.environ.get("CODEX_RELAY_NO_UPDATE_CHECK"):
+    if update_checks_disabled():
         return None
     cache_directory = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"),
                                    "codex-relay")
     cache_path = os.path.join(cache_directory, "update_check.json")
+
+    def write_cache(latest):
+        os.makedirs(cache_directory, exist_ok=True)
+        temporary = cache_path + f".{os.getpid()}.tmp"
+        with open(temporary, "w") as handle:
+            json.dump({"checked_at": time.time(), "latest": latest}, handle)
+        os.replace(temporary, cache_path)
+
     try:
         cache = json.load(open(cache_path))
-    except (OSError, ValueError):
-        cache = {}
-    if not isinstance(cache, dict):
-        cache = {}
-    try:
         checked_at = float(cache.get("checked_at") or 0)
-    except (TypeError, ValueError):
-        checked_at = 0
-    latest = cache.get("latest")
+        latest = cache.get("latest")
+    except (OSError, ValueError, TypeError, AttributeError):
+        checked_at, latest = 0, None
     if time.time() - checked_at >= UPDATE_CHECK_INTERVAL_SECONDS:
-        latest = None
         try:
-            url = os.environ.get("CODEX_RELAY_UPDATE_URL") or LATEST_SKILL_URL
-            with urllib.request.urlopen(url, timeout=3) as response:
-                found = version_tuple(response.read(65536).decode("utf-8", "replace"))
-            latest = ".".join(map(str, found)) if found else None
+            write_cache(latest)  # stamp first, so a failing fetch is not retried on every command
+        except OSError:
+            return None
+        try:
+            latest = fetch_latest_version(os.environ.get("CODEX_RELAY_UPDATE_URL") or LATEST_SKILL_URL)
         except Exception:
             latest = None
         try:
-            os.makedirs(cache_directory, exist_ok=True)
-            json.dump({"checked_at": time.time(), "latest": latest}, open(cache_path, "w"))
+            write_cache(latest)
         except OSError:
             pass
+    newest = version_tuple(f"  version: {latest}") if isinstance(latest, str) else None
     current = local_version()
-    try:
-        newer = latest and current and tuple(int(part) for part in str(latest).split(".")) > current
-    except ValueError:
-        newer = False
-    if not newer:
+    if not (newest and current and newest > current):
         return None
-    return {"current": ".".join(map(str, current)), "latest": latest, "repository": REPOSITORY_URL,
-            "instructions": UPDATE_INSTRUCTIONS}
+    return {"current": ".".join(map(str, current)), "latest": ".".join(map(str, newest)),
+            "repository": REPOSITORY_URL, "instructions": UPDATE_INSTRUCTIONS}
 
 
 # ---------- commands ----------
@@ -838,8 +861,7 @@ def command_new(arguments):
     working_directory = os.path.abspath(os.path.expanduser(arguments.cwd))
     if not os.path.isdir(working_directory):
         raise RelayError(f"no such directory: {working_directory}", kind="invalid_input", exit_code=EXIT_INVALID)
-    check_protocol_compatibility()
-    IpcConnection().close()  # the app must be up before anything is created
+    IpcConnection().close()  # the app must be up, and speak our protocol, before anything is created
     binary = codex_binary()
     title = " ".join((arguments.title or f"codex-relay task {time.strftime('%m-%d %H:%M')}").split())[:80]
     marker = uuid.uuid4().hex[:12]
@@ -1273,7 +1295,8 @@ def command_notify(arguments):
 
 
 def command_doctor(arguments):
-    checks = {"relay_version": RELAY_VERSION, "python": sys.version.split()[0], "platform": sys.platform,
+    version = local_version()
+    checks = {"relay_version": ".".join(map(str, version)) if version else None, "python": sys.version.split()[0], "platform": sys.platform,
               "codex_home": codex_home(), "state_directory": state_directory(), "session": current_session()}
     problems = []
     if sys.platform != "darwin":

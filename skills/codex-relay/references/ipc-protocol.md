@@ -1,6 +1,6 @@
 # Codex desktop app: relay protocol reference
 
-Undocumented and reverse-engineered. Verified on ChatGPT.app 26.917.51856 (2026-09-23) and 26.917.71314 (2026-09-24), macOS, bundled CLI 0.155.0-alpha.16.x. The relay checks the app's method-version table on first use of each app build, and refuses to run on a mismatch (see "After an app update").
+Undocumented and reverse-engineered. Verified on ChatGPT.app 26.917.51856 (2026-09-23) and 26.917.71314 (2026-09-24), macOS, bundled CLI 0.155.0-alpha.16.x. Before talking to a new app build, the relay compares the app's method-version table with its own and refuses to run on a mismatch (see "After an app update").
 
 ## Why this channel
 
@@ -56,7 +56,7 @@ With a request-level `hostId` (remote hosts, not used by the relay), every `thre
 
 All of these are sent to the owner with `targetClientId`.
 
-- **Start a turn:** `thread-follower-start-turn` with `{conversationId, turnStart: {request: {threadId, input: [{type: "text", text, text_elements: []}, {type: "localImage", path}...]}, context: {}}}`. The owner fills in cwd, sandbox, approvals, model and effort from the thread's settings. **`model`/`effort` fields inside `request` did not take effect** in testing (the audit's finding B1). Set them with the next method instead.
+- **Start a turn:** `thread-follower-start-turn` with `{conversationId, turnStart: {request: {threadId, input: [{type: "text", text, text_elements: []}, {type: "localImage", path}...]}, context: {}}}`. The owner fills in cwd, sandbox, approvals, model and effort from the thread's settings. **`model`/`effort` fields inside `request` did not take effect** in testing. Set them with the next method instead.
 - **Set model and effort for the next turn:** `thread-follower-update-thread-settings` with `{conversationId, threadSettings: {model, effort}, activeTurnId: null, condition: null}`. This is exactly what the app's own composer sends, and it returns `{applied: true}`. The owner calls app-server `thread/settings/update`, falling back to local state when that method is missing. `threadSettings` also accepts `approvalPolicy` and `sandboxPolicy` (the tests used them on a scratch task). The relay never changes those.
 - **Steer:** `thread-follower-steer-turn` with `{conversationId, input, restoreMessage: {text, cwd, context: {workspaceRoots: [cwd], commentAttachments: []}, responsesapiClientMetadata: {}}, serviceTier: null, attachments: [], clientUserMessageId, additionalContext: null, toolOutput: null}`. The owner finds the active turn itself, and fails with `no active turn to steer` when there isn't one.
 - **Interrupt:** `thread-follower-interrupt-turn` (version 3) with `{conversationId, mode: "user-stop"}`, which returns `{interruptedTurnId, ok}`. Other modes are `system` (the default) and `descendant-cleanup`. It stops the model's turn. Shell processes the turn already started keep running.
