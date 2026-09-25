@@ -1,0 +1,14 @@
+{
+  "name": "codex-relay",
+  "description": "Delegate work from Claude Code to Codex in the ChatGPT desktop app, and supervise it while you watch.",
+  "owner": {
+    "name": "exgota"
+  },
+  "plugins": [
+    {
+      "name": "codex-relay",
+      "source": "./",
+      "description": "Delegate work from Claude Code to Codex in the ChatGPT desktop app, and supervise it while you watch."
+    }
+  ]
+}

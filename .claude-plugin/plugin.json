@@ -1,0 +1,16 @@
+{
+  "name": "codex-relay",
+  "description": "Delegate work from Claude Code to Codex in the ChatGPT desktop app, and supervise it while you watch.",
+  "author": {
+    "name": "exgota",
+    "url": "https://github.com/exgota"
+  },
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "chatgpt",
+    "claude-code",
+    "delegation",
+    "macos"
+  ]
+}
