@@ -5,7 +5,8 @@ A task is a Codex thread in the ChatGPT desktop app. Writes (start a turn, steer
 interrupt, change settings) go through the app's local IPC router as a thread
 follower, the channel a second app window uses. Progress and outcomes are read
 from the task's rollout file; the app's live snapshot fills in what the rollout
-cannot show (pending approvals, commands still running, lost turns).
+cannot show (pending approvals, commands still running, lost turns). Goals and the
+thread list come from Codex's own databases, opened read-only.
 
 Every command prints JSON on stdout: one object, except `new`, which first prints a
 line with the task id as soon as the task exists. Exit codes:
@@ -25,11 +26,13 @@ import re
 import select
 import shutil
 import socket
+import sqlite3
 import struct
 import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 import urllib.request
 import uuid
 
@@ -42,7 +45,7 @@ UPDATE_INSTRUCTIONS = (
     "Skills CLI: npx skills update codex-relay. "
     "By hand: copy the new skills/codex-relay/ folder over the old one. "
     "To stop these checks, set CODEX_RELAY_NO_UPDATE_CHECK=1.")
-TESTED_APP_VERSIONS = ("26.917.51856", "26.917.71314")
+TESTED_APP_VERSIONS = ("26.917.51856", "26.917.71314", "26.930.21537")
 APP_BUNDLE_IDENTIFIER = "com.openai.codex"
 # Per-method protocol versions this relay speaks. Checked against the app bundle's own
 # table on first use of each app build (see check_protocol_compatibility).
@@ -60,6 +63,10 @@ EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 UUID_PATTERN = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 QUESTION_TOOL_NAMES = ("request_user_input", "request_user_input_async")
 QUIET_SECONDS_BEFORE_APP_CHECK = 15
+# A goal's next turn starts about 25 ms after the last one ends; wait this long for it.
+GOAL_CONTINUATION_GRACE_SECONDS = 5
+# Codex may reject a question at once (request_user_input is unavailable in default mode).
+QUESTION_SETTLE_SECONDS = 3
 EXIT_OK, EXIT_FAILED, EXIT_INVALID, EXIT_WRONG_STATE, EXIT_APP, EXIT_NOT_PERMITTED = 0, 1, 2, 3, 4, 5
 
 
@@ -125,9 +132,10 @@ def codex_binary():
     if on_path:
         return on_path
     app = find_app()
-    bundled = app and os.path.join(app, "Contents", "Resources", "codex")
-    if bundled and os.access(bundled, os.X_OK):
-        return bundled
+    for relative in (("codex-cli", "bin", "codex"), ("codex",)):  # 26.930 moved it into codex-cli/bin
+        bundled = app and os.path.join(app, "Contents", "Resources", *relative)
+        if bundled and os.path.isfile(bundled) and os.access(bundled, os.X_OK):
+            return bundled
     raise RelayError("no codex binary: not on PATH and not inside the ChatGPT app bundle",
                      kind="app_unavailable", exit_code=EXIT_APP)
 
@@ -561,10 +569,23 @@ def track_from(path, offset):
     return tracker
 
 
-def track_whole(path):
-    tracker = TaskTracker()
-    tracker.feed(path, 0)
-    return tracker
+def track_current_turn(path, chunk=4 << 20):
+    """State of the latest turn, read from the end of the rollout. Rollouts of long tasks
+    reach hundreds of megabytes, and every field the tracker reports resets at task_started."""
+    size = os.path.getsize(path)
+    while True:
+        tracker = TaskTracker()
+        if chunk >= size:
+            tracker.feed(path, 0)
+            return tracker
+        with open(path, "rb") as handle:
+            handle.seek(size - chunk)
+            handle.readline()  # skip the partial first line
+            start = handle.tell()
+        tracker.feed(path, start)
+        if tracker.turn_id is not None:
+            return tracker
+        chunk *= 8
 
 
 def digest_seen_after(path, offset, digest):
@@ -583,17 +604,57 @@ def wait_for_rollout(path, offset, predicate, timeout):
     return None
 
 
+# ---------- Codex databases (read-only) ----------
+
+def codex_database(prefix):
+    """Newest-schema database file such as goals_1.sqlite; the suffix is Codex's schema version."""
+    paths = glob.glob(os.path.join(codex_home(), f"{prefix}_*.sqlite"))
+    numbered = [(int(match.group(1)), path) for path in paths
+                if (match := re.search(rf"{prefix}_(\d+)\.sqlite$", path))]
+    return max(numbered)[1] if numbered else None
+
+
+def query_database(prefix, sql, parameters=()):
+    """Rows from a Codex database, or None when it is missing or its schema differs."""
+    path = codex_database(prefix)
+    if not path:
+        return None
+    try:
+        connection = sqlite3.connect(f"file:{urllib.parse.quote(path)}?mode=ro", uri=True, timeout=2)
+        try:
+            connection.row_factory = sqlite3.Row
+            return [dict(row) for row in connection.execute(sql, parameters)]
+        finally:
+            connection.close()
+    except sqlite3.Error:
+        return None
+
+
+def read_goal(task):
+    """The task's goal, or None. Codex deletes the row when a goal completes."""
+    rows = query_database("goals", "SELECT status, objective, token_budget, tokens_used, time_used_seconds "
+                                   "FROM thread_goals WHERE thread_id = ?", (task,))
+    if not rows:
+        return None
+    goal = rows[0]
+    goal["objective"] = goal["objective"][:500]
+    return goal
+
+
 # ---------- combined task inspection ----------
 
 def inspect(task, record=None, use_app=True):
     """Best available state: rollout first, then the app's live snapshot."""
     path = find_rollout(task, record)
-    tracker = track_whole(path)
+    tracker = track_current_turn(path)
     result = {"task": task, "state": tracker.state(), "turn_id": tracker.turn_id,
               "model": tracker.model, "effort": tracker.effort,
               "last_activity_seconds": tracker.seconds_since_activity(),
               "final_message": tracker.final_message if tracker.state() in ("completed", "failed") else None,
               "error": tracker.turn_error, "source": "rollout", "limits": []}
+    goal = read_goal(task)
+    if goal:
+        result["goal"] = goal
     if tracker.state() == "waiting_for_input":
         result["questions"] = tracker.pending_questions()
     if result["state"] not in ("working", "waiting_for_input"):
@@ -693,7 +754,7 @@ def verify_turn_settings(connection, owner, task, record, tracker, requested):
 
 def start_turn(connection, owner, task, record, text, image_paths, model=None, effort=None, background=True):
     path = find_rollout(task, record)
-    before = track_whole(path)
+    before = track_current_turn(path)
     requested = None
     if model or effort:
         requested = apply_settings(connection, owner, task, record, before, model, effort)
@@ -938,7 +999,7 @@ def command_new(arguments):
     record = load_record(task)
     record["stage"] = "ready"
     path = find_rollout(task, record)
-    bootstrap_state = track_whole(path)
+    bootstrap_state = track_current_turn(path)
     if arguments.effort and bootstrap_state.effort != arguments.effort:
         save_record(record)
         raise RelayError("thread setup ran with a different effort than requested", kind="settings_mismatch",
@@ -1103,6 +1164,11 @@ def command_interrupt(arguments):
                         "(null means the app could not be asked)."}
     if not reply["ok"]:
         result["ipc_error"] = reply["error"]
+    elif (reply["result"] or {}).get("goalPauseError"):
+        result["goal_pause_error"] = reply["result"]["goalPauseError"]
+    goal = read_goal(task)
+    if goal:
+        result["goal"] = goal  # an interrupt pauses an active goal
     return emit(result, EXIT_OK if stopped else EXIT_FAILED)
 
 
@@ -1157,10 +1223,13 @@ def wait_loop(task, record, timeout, progress):
     end_of_file = os.path.getsize(path)
     base = operation.get("rollout_offset", end_of_file) if operation.get("kind") in ("start", "steer") else end_of_file
     cursor = record.get("wait_cursor") if owned and record.get("wait_cursor") is not None else base
-    tracker = track_from(path, operation["rollout_offset"]) if operation.get("kind") == "start" else track_whole(path)
+    if operation.get("kind") == "start":
+        tracker = track_from(path, operation["rollout_offset"])
+    else:
+        tracker = track_current_turn(path)
     deadline = time.time() + max(timeout, 1)
     app_check_interval, next_app_check = QUIET_SECONDS_BEFORE_APP_CHECK, 0
-    new_messages, state = [], tracker.state()
+    new_messages, state, settle_until = [], tracker.state(), None
 
     def finish(result):
         if owned:
@@ -1178,7 +1247,23 @@ def wait_loop(task, record, timeout, progress):
             if time.time() - operation.get("at", time.time()) > 45:
                 state = "not_started"
                 break
-        if state in ("completed", "interrupted", "failed", "lost", "waiting_for_input") or (progress and new_messages):
+        if progress and new_messages:
+            break
+        # Two states need a moment to confirm: a question Codex may reject at once, and a
+        # completed turn whose active goal is about to start the next one.
+        settle = None
+        if state == "waiting_for_input":
+            settle = QUESTION_SETTLE_SECONDS
+        elif state == "completed" and (read_goal(task) or {}).get("status") == "active":
+            settle = GOAL_CONTINUATION_GRACE_SECONDS
+        if settle is not None:
+            settle_until = settle_until or time.time() + settle
+            if time.time() >= min(settle_until, deadline):
+                break
+            time.sleep(0.5)
+            continue
+        settle_until = None
+        if state in ("completed", "interrupted", "failed", "lost"):
             break
         quiet = tracker.seconds_since_activity()
         if quiet is not None and quiet < QUIET_SECONDS_BEFORE_APP_CHECK:
@@ -1210,6 +1295,12 @@ def wait_loop(task, record, timeout, progress):
     if state in ("completed", "failed"):
         result["final_message"] = tracker.final_message
         result["error"] = tracker.turn_error
+    goal = read_goal(task)
+    if goal:
+        result["goal"] = goal
+        if state == "completed" and goal["status"] == "active":
+            result["detail"] = ("the turn ended but its goal is still active and no next turn has started; "
+                                "run `status` before sending anything")
     if state in ("working", "starting") and time.time() >= deadline:
         result["detail"] = "still working when the wait ended; call wait again"
     return finish(result)
@@ -1251,6 +1342,48 @@ def command_read(arguments):
                                             for role, text in messages[-arguments.last:]]})
 
 
+def thread_title(text):
+    """First line of a thread's title, without the label instruction `new` appends to it."""
+    text = (text or "").split("(codex-relay setup", 1)[0].strip()
+    return text.splitlines()[0][:80] if text else ""
+
+
+def recent_threads(limit, include_subagents):
+    """Recent unarchived threads from Codex's state database, or None when it is unreadable."""
+    rows = query_database("state", "SELECT id, rollout_path, title, name, source, agent_nickname, model, "
+                                   "reasoning_effort, cwd FROM threads WHERE archived = 0 "
+                                   + ("" if include_subagents else "AND source NOT LIKE '%subagent%' ")
+                                   + "ORDER BY updated_at DESC LIMIT ?", (limit,))
+    if rows is None:
+        return None
+    threads = []
+    for row in rows:
+        thread = {"task": row["id"], "path": row["rollout_path"], "title": thread_title(row["name"] or row["title"]),
+                  "model": row["model"], "effort": row["reasoning_effort"], "cwd": row["cwd"]}
+        if "subagent" in (row["source"] or ""):
+            try:
+                spawn = json.loads(row["source"])["subagent"]["thread_spawn"]
+                thread.update(parent=spawn.get("parent_thread_id"), nickname=row["agent_nickname"])
+            except (ValueError, KeyError, TypeError):
+                thread["parent"] = None
+        threads.append(thread)
+    return threads
+
+
+def first_user_line(path):
+    """Fallback title: the first user message within the rollout's first megabyte."""
+    with open(path, "rb") as handle:
+        data = handle.read(1 << 20)
+    for line in data.splitlines():
+        try:
+            found = message_of(json.loads(line))
+        except ValueError:
+            continue
+        if found and found[0] == "user" and found[1].strip():
+            return thread_title(found[1])
+    return ""
+
+
 def command_list(arguments):
     records = {}
     for path in glob.glob(os.path.join(state_directory(), "tasks", "*.json")):
@@ -1259,11 +1392,13 @@ def command_list(arguments):
             records[record["task"]] = record
         except (OSError, ValueError, KeyError):
             continue
-    rows = []
-    if arguments.all:
+    threads = recent_threads(arguments.limit, arguments.subagents) if arguments.all else None
+    source = "state database"
+    if arguments.all and threads is None:
+        source = "rollout scan"
         paths = glob.glob(os.path.join(codex_home(), "sessions", "*", "*", "*", "rollout-*.jsonl"))
         paths.sort(key=os.path.getmtime, reverse=True)
-        tasks = []
+        threads = []
         for path in paths:
             with open(path, "rb") as handle:
                 first = handle.readline()
@@ -1271,34 +1406,38 @@ def command_list(arguments):
                 meta = json.loads(first).get("payload") or {}
             except ValueError:
                 meta = {}
-            if "subagent" in json.dumps(meta.get("source", "")):
+            if not arguments.subagents and "subagent" in json.dumps(meta.get("source", "")):
                 continue
-            tasks.append((path[-42:-6], path))
-            if len(tasks) >= arguments.limit:
+            threads.append({"task": path[-42:-6], "path": path})
+            if len(threads) >= arguments.limit:
                 break
-    else:
-        tasks = [(task, None) for task in sorted(records, key=lambda key: -(records[key].get("updated_at") or 0))
-                 if records[task].get("session") == current_session()][:arguments.limit]
-    for task, path in tasks:
+    elif not arguments.all:
+        threads = [{"task": task} for task in sorted(records, key=lambda key: -(records[key].get("updated_at") or 0))
+                   if records[task].get("session") == current_session()][:arguments.limit]
+    rows = []
+    for thread in threads:
+        task, path = thread.pop("task"), thread.pop("path", None)
         try:
-            path = path or find_rollout(task, records.get(task))
-            tracker = track_whole(path)
-            first_user = ""
-            for event in read_events(path)[0][:400]:
-                found = message_of(event)
-                if found and found[0] == "user" and found[1].strip():
-                    first_user = found[1].strip().splitlines()[0][:80]
-                    break
-            state = tracker.state()
+            if not (path and os.path.exists(path)):
+                path = find_rollout(task, records.get(task))
+            state = track_current_turn(path).state()
+            if "title" not in thread:
+                thread["title"] = first_user_line(path)
         except RelayError as error:
-            state, first_user = error.kind, ""
+            state = error.kind
         record = records.get(task) or {}
-        rows.append({"task": task, "state": state, "title": first_user,
-                     "control": "this session" if record.get("session") == current_session()
-                     else ("other session" if record else "none"),
-                     "updated": time.strftime("%m-%d %H:%M", time.localtime(os.path.getmtime(path)))
-                     if path and os.path.exists(path) else None})
-    return emit({"tasks": rows, "note": "states come from rollouts; approvals need `status`"})
+        row = {"task": task, "state": state, "title": thread.pop("title", ""),
+               "control": "this session" if record.get("session") == current_session()
+               else ("other session" if record else "none"),
+               "updated": time.strftime("%m-%d %H:%M", time.localtime(os.path.getmtime(path)))
+               if path and os.path.exists(path) else None}
+        row.update(thread)
+        goal = read_goal(task)
+        if goal:
+            row["goal"] = {key: goal[key] for key in ("status", "tokens_used", "token_budget")}
+        rows.append(row)
+    return emit({"tasks": rows, "source": source if arguments.all else "relay records",
+                 "note": "states come from rollouts; approvals and running commands need `status`"})
 
 
 def focus_terminal():
@@ -1445,6 +1584,7 @@ def main():
 
     sub = commands.add_parser("list", help="tasks this session controls (--all: recent tasks)")
     sub.add_argument("--all", action="store_true"); sub.add_argument("--limit", type=int, default=15)
+    sub.add_argument("--subagents", action="store_true", help="with --all, include sub-agent threads")
     sub.set_defaults(handler=command_list)
 
     sub = commands.add_parser("adopt", help="take control of a task the user named")

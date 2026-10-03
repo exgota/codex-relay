@@ -11,6 +11,8 @@ It suits jobs where Codex is the better tool: computer use, the app's browser wi
 - **Reports Codex's state:** working, waiting for your answer, waiting for your approval, done, interrupted, failed, or cut off. Questions and approvals always come back to you. The relay never answers them.
 - **Keeps starting and steering separate.** One command starts a turn and another changes a running turn, so a new brief can't slip into work that's already running.
 - **Controls only its own tasks.** It sends to, steers and stops only tasks this Claude session created or adopted. The skill tells Claude to adopt a task only when you name it. Reading any task's state is allowed. Outside Claude Code, all callers share one session unless you set `CODEX_RELAY_SESSION`.
+- **Runs long work as a goal.** A brief can tell Codex to set a goal with a token budget. Codex then keeps working across turns on its own, and one wait follows every turn until the goal is done, blocked or out of budget.
+- **Shows every Codex task at once.** `list --all` reads the app's own thread table: titles, states, models, folders, goals and, with `--subagents`, the sub-agent tree.
 - **Tells you when control changes.** Claude posts a macOS notification when it takes over and another when it hands back. The second one also brings your terminal to the front.
 
 ## Requirements
@@ -115,7 +117,7 @@ The protocol is undocumented. [`references/ipc-protocol.md`](skills/codex-relay/
 
 ## Testing
 
-Tested on macOS, on scratch tasks only. On a second Mac with ChatGPT app 26.917.51856 and no prior install, a fresh clone passed `doctor`, installed with the skills CLI, and ran a task end to end. The live checks below ran on app 26.917.71314:
+Tested on macOS, on scratch tasks only. On a second Mac with ChatGPT app 26.917.51856 and no prior install, a fresh clone passed `doctor`, installed with the skills CLI, and ran a task end to end. The live checks below ran on app 26.917.71314, and the goal checks after them on 26.930.21537:
 
 - a task from creation to a checked result
 - effort confirmed on new and existing tasks
@@ -129,6 +131,7 @@ Tested on macOS, on scratch tasks only. On a second Mac with ChatGPT app 26.917.
 - a fresh install on the macOS system Python (3.9), without `codex` on PATH, and with a custom `CODEX_HOME`
 - an incompatible app refused before anything ran
 - the hand-back notification, delivered to macOS Notification Center, and the terminal refocus
+- on 26.930.21537: a new task, a steer during a running command, an interrupt that listed that command, a goal that Codex set and finished over three turns inside one wait, an interrupt that paused a goal, and a question the app rejected without being reported as waiting
 
 Defects found in review were fixed and re-checked.
 
@@ -136,7 +139,8 @@ Not tested:
 
 - the app quitting in the middle of a turn
 - Intel Macs
-- app versions other than the two above
+- app versions other than the three above
+- approvals on 26.930.21537
 - notifications on Macs where Script Editor isn't allowed to post them (`osascript` notifications appear under Script Editor)
 
 ## Limitations
@@ -147,6 +151,7 @@ Not tested:
 - **Approvals show up with a delay.** Only the app sees them, so the relay checks while Codex is quiet: about 15 seconds into a silence, then at widening intervals of up to a minute.
 - **Archive in the app.** The relay has no archive command. It reports an archived task as `archived` and won't send to it.
 - **No remote hosts.** SSH and remote-control machines in the app aren't supported.
+- **Interrupting pauses a goal.** Codex can't replace or close a paused goal, so that task can't take a new one until you resume or clear the goal in the app.
 - **App updates can break it.** When an update changes the protocol, commands that talk to the app stop with `incompatible_app` instead of guessing. `doctor` shows what changed.
 
 ## Disclaimer

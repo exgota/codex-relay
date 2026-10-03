@@ -1,6 +1,6 @@
 # Codex desktop app: relay protocol reference
 
-Undocumented and reverse-engineered. Verified on ChatGPT.app 26.917.51856 (2026-09-23) and 26.917.71314 (2026-09-24), macOS, bundled CLI 0.155.0-alpha.16.x. Before talking to a new app build, the relay compares the app's method-version table with its own and refuses to run on a mismatch (see "After an app update").
+Undocumented and reverse-engineered. Verified on ChatGPT.app 26.917.51856 (2026-09-23), 26.917.71314 (2026-09-24) and 26.930.21537 (2026-10-03), macOS. 26.930.21537 bundles CLI 0.159.0-alpha.12.1 at `Contents/Resources/codex-cli/bin/codex` (earlier builds: `Contents/Resources/codex`, 0.155.0-alpha.16.x). Before talking to a new app build, the relay compares the app's method-version table with its own and refuses to run on a mismatch (see "After an app update").
 
 ## Why this channel
 
@@ -41,10 +41,16 @@ The desktop app runs its own `codex app-server` as a private stdio child, so the
 | `thread-follower-update-thread-settings` | 2 |
 | `thread-follower-load-complete-history` | 1 |
 | `thread-follower-update-daybreak` | 1 (new in 26.917.71314; unused) |
+| `thread-follower-remove-queued-message`, `-clear-queued-messages` | 1 (new in 26.930.21537; unused) |
+| `thread-follower-submit-mcp-server-elicitation-response` | 1 (unused) |
 | `thread-follower-compact-thread`, `-submit-user-input`, `-*-approval-*`, `-set-queued-follow-ups-state` | 1 (unused) |
 | `thread-follower-edit-last-user-turn` | 2 (unused) |
 | `thread-stream-following-changed` (broadcast) | 1 |
 | `thread-stream-state-changed` (broadcast) | 11 |
+| `thread-stream-following-status-requested`, `ipc-connection-reset`, `thread-unarchived` (broadcasts) | 1 (unused) |
+| `thread-read-state-changed` (broadcast, `{hostId, conversationId, hasUnreadTurn}`) | 3 (unused) |
+| `thread-archived` (broadcast) | 2 (unused) |
+| `thread-queued-followups-changed` (broadcast) | 2 (unused) |
 
 With a request-level `hostId` (remote hosts, not used by the relay), every `thread-follower-*` version is one higher. Interrupt is then always 5.
 
@@ -57,9 +63,9 @@ With a request-level `hostId` (remote hosts, not used by the relay), every `thre
 All of these are sent to the owner with `targetClientId`.
 
 - **Start a turn:** `thread-follower-start-turn` with `{conversationId, turnStart: {request: {threadId, input: [{type: "text", text, text_elements: []}, {type: "localImage", path}...]}, context: {}}}`. The owner fills in cwd, sandbox, approvals, model and effort from the thread's settings. **`model`/`effort` fields inside `request` did not take effect** in testing. Set them with the next method instead.
-- **Set model and effort for the next turn:** `thread-follower-update-thread-settings` with `{conversationId, threadSettings: {model, effort}, activeTurnId: null, condition: null}`. This is exactly what the app's own composer sends, and it returns `{applied: true}`. The owner calls app-server `thread/settings/update`, falling back to local state when that method is missing. `threadSettings` also accepts `approvalPolicy` and `sandboxPolicy` (the tests used them on a scratch task). The relay never changes those.
+- **Set model and effort for the next turn:** `thread-follower-update-thread-settings` with `{conversationId, threadSettings: {model, effort}, activeTurnId: null, condition: null}`. This is exactly what the app's own composer sends, and it returns `{applied: true}`. The owner calls app-server `thread/settings/update`, falling back to local state when that method is missing. `threadSettings` also accepts `approvalPolicy` and `sandboxPolicy` (the tests used them on a scratch task). The relay never changes those. Since 26.930.21537 a non-null `activeTurnId` applies `threadSettings` as permissions to the running turn. The relay never sends one.
 - **Steer:** `thread-follower-steer-turn` with `{conversationId, input, restoreMessage: {text, cwd, context: {workspaceRoots: [cwd], commentAttachments: []}, responsesapiClientMetadata: {}}, serviceTier: null, attachments: [], clientUserMessageId, additionalContext: null, toolOutput: null}`. The owner finds the active turn itself, and fails with `no active turn to steer` when there isn't one.
-- **Interrupt:** `thread-follower-interrupt-turn` (version 3) with `{conversationId, mode: "user-stop"}`, which returns `{interruptedTurnId, ok}`. Other modes are `system` (the default) and `descendant-cleanup`. It stops the model's turn. Shell processes the turn already started keep running.
+- **Interrupt:** `thread-follower-interrupt-turn` (version 3) with `{conversationId, mode: "user-stop"}`, which returns `{interruptedTurnId, ok}`. Other modes are `system` (the default) and `descendant-cleanup`. It stops the model's turn. Shell processes the turn already started keep running. Since 26.930.21537 a `user-stop` on a thread with a goal can also return `goalPauseError`, and the interrupt pauses the goal.
 - **Live snapshot:** broadcast `thread-stream-following-changed {conversationId, hostId: "local", following: true}`, then request `thread-follower-load-complete-history {conversationId}`. The owner broadcasts `thread-stream-state-changed` with `change.type: "snapshot"` and the full `conversationState`, and patches follow as the thread moves. Broadcast `following: false` afterwards. Without the follow step, the request fails with `no-client-found: thread stream owner became unavailable`. Fields the relay reads:
   - `threadRuntimeStatus`: `{type: idle | active | systemError | notLoaded, activeFlags: [waitingOnApproval | waitingOnUserInput]}`
   - `requests`: pending server requests
@@ -70,12 +76,27 @@ All of these are sent to the owner with `targetClientId`.
 
 The app writes `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<timestamp>-<thread id>.jsonl` as the thread runs.
 
-- The only `event_msg` types seen in a month of rollouts are `task_started`, `task_complete`, `turn_aborted`, `item_completed`, `thread_settings_applied` and `token_count`.
+- The only `event_msg` types seen in a month of rollouts are `task_started`, `task_complete`, `turn_aborted`, `item_completed`, `thread_settings_applied` and `token_count`. 26.930.21537 adds `thread_goal_updated` for goals set in the app.
 - `turn_context` (a top-level type) carries the turn's actual `model` and `effort`. It is written just after `task_started`.
 - A failure is a `task_complete` with an `error` object (for example `serverOverloaded`). An interrupt is `turn_aborted` with `reason: interrupted`. A turn cut off by an app restart or a killed setup has **no** end event: 25 of 824 turns in September.
 - A question to the user is a `response_item` `function_call` named `request_user_input` with no matching `function_call_output` yet.
 - **Approval requests are never written to the rollout.** They're visible only in the live snapshot.
 - Shell commands run asynchronously through the `exec` tool. A command shows up in the rollout (`item_completed` `CommandExecution`) only when it finishes, so a still-running command is visible only in the snapshot.
+
+## Thread storage (26.930.21537)
+
+- `$CODEX_HOME/state_5.sqlite`, table `threads`: one row per thread with `id`, `rollout_path`, `title`, `name`, `source` (`exec`, `vscode`, or a JSON object with `subagent.thread_spawn.parent_thread_id` for sub-agents), `agent_nickname`, `model`, `reasoning_effort`, `cwd`, `archived`, `updated_at`, `history_mode`. `list --all` reads it read-only. The numeric suffix is the schema version, so the relay picks the highest one present.
+- Every thread has `history_mode = paginated`, with history in `thread_history_1.sqlite`. Rollout files are still written next to it and were complete for every turn checked on 2026-10-03. If a later build stops writing rollouts, every state the relay reports breaks. `codex migrate-rollouts` is the CLI's migration tool.
+- The CLI now also runs a shared app-server daemon (`codex app-server daemon`, control socket `$CODEX_HOME/app-server-control/app-server-control.sock`, `codex agents`, `codex queue`). The desktop app still runs its own private stdio app-server, so the daemon can't reach app threads.
+
+## Goals (26.930.21537)
+
+- App-server methods `thread/goal/set` `{threadId, objective?, status?, tokenBudget?}`, `thread/goal/get` and `thread/goal/clear`, with notifications `thread/goal/updated` and `thread/goal/cleared`. Statuses: `active`, `paused`, `blocked`, `usageLimited`, `budgetLimited`, `complete`. The app calls them only from the owning window (the composer's `/goal <objective>`), and no follower method reaches them.
+- The model has tools `create_goal` `{objective, token_budget}`, `update_goal` `{status}` and `get_goal` (feature `goals`, stable). With code mode on, Codex calls them inside its `exec` tool as `tools.create_goal(...)`, so the rollout shows a `custom_tool_call` named `exec`. This is how a relay brief sets a goal.
+- `$CODEX_HOME/goals_1.sqlite`, table `thread_goals` (`thread_id`, `status`, `objective`, `token_budget`, `tokens_used`, `time_used_seconds`): the relay reads it read-only for the `goal` field. A goal's row is deleted when it completes. Goals set from the app write `thread_goal_updated` events to the rollout. Goals set through the model tools write none.
+- While a goal is active, the app-server starts the next turn about 25 ms after `task_complete`. Its first user message begins `<codex_internal_context source="goal">`.
+- An interrupt pauses the goal. The model can't replace a paused goal (`create_goal` fails) or close an unfinished one (`update_goal` allows `complete` only once the objective is met). Only the app can resume or clear it.
+- `request_user_input` is unavailable in the default collaboration mode: the call is answered at once with an error. It is still a plain `function_call`, never routed through `exec`.
 
 ## Creating a task
 
@@ -90,6 +111,7 @@ Any process running as the user can drive Codex through this socket, with whatev
 1. Run `python3 scripts/codex_relay.py doctor`. It reads the app version, compares the bundle's method table with `METHOD_VERSIONS`, checks the `codex` binary and `CODEX_HOME`, and does an IPC handshake.
 2. If the protocol check fails, re-derive it. `app.asar` is a Pickle header (4 × uint32 little-endian) followed by a JSON file table, and file bytes live at `8 + header_size + offset`. Extract the `.js` files containing `thread-follower`:
    - `.vite/build/src-*.js`: the router, the frame reader and the `nb` version table
-   - `.vite/build/main-*.js` and `webview/assets/app-initial-*.js`: the owner's `handleThreadFollowerRequest` switch (it takes `case` + a backtick-quoted method name) and the follower-side request builders, which give the exact params
+   - the owner's `handleThreadFollowerRequest` switch (it takes `case` + a backtick-quoted method name) and the follower-side request builders, which give the exact params: `.vite/build/bootstrap-*.js` and `webview/assets/app-shared-*.js` in 26.930.21537, `.vite/build/main-*.js` and `webview/assets/app-initial-*.js` before. The names change between builds, so search every `.js` file for `thread-follower`.
+   - `codex app-server generate-json-schema --out <dir>` writes the app-server's own request schemas, such as the goal methods.
 3. Update `METHOD_VERSIONS`, the param shapes and `TESTED_APP_VERSIONS` in the script.
-4. Re-test on scratch tasks only, in this order: `doctor`, `new --effort low`, confirm the effort in the rollout's `turn_context`, `send` a follow-up at another effort, a steer during `sleep 20`, a question (`request_user_input`), an interrupt during `sleep 45`, and `notify end`.
+4. Re-test on scratch tasks only, in this order: `doctor`, `new --effort low`, confirm the effort in the rollout's `turn_context`, `send` a follow-up at another effort, a steer during `sleep 20`, a question (`request_user_input`), an interrupt during `sleep 45`, a brief that sets a goal over three turns (one `wait` should follow all three), and `notify end`.

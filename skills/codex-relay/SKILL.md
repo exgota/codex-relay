@@ -2,10 +2,10 @@
 name: codex-relay
 description: Delegate work to Codex in the ChatGPT desktop app and supervise it while the user watches. Start tasks, check progress, steer, stop. Use when the user asks to hand work to Codex or a GPT model, to use Codex's logged-in browser or computer use, to generate images with GPT Image, or to check on, steer or stop a Codex task they named.
 license: MIT
-compatibility: Requires macOS, the ChatGPT desktop app with Codex (signed in and running), and Python 3.8 or later. Tested with ChatGPT app 26.917.51856 and 26.917.71314.
+compatibility: Requires macOS, the ChatGPT desktop app with Codex (signed in and running), and Python 3.8 or later. Tested with ChatGPT app 26.917.51856, 26.917.71314 and 26.930.21537.
 allowed-tools: Bash(python3 ${CLAUDE_SKILL_DIR}/scripts/codex_relay.py:*)
 metadata:
-  version: "1.0.0"
+  version: "1.1.0"
 ---
 
 # Codex relay
@@ -49,6 +49,8 @@ The relay is done when the user's outcome has been observed, or control has been
 | `not_started` | a start request left no trace | `status` reports `starting` for 45 s, then `not_started`. Resend only after `not_started`. |
 | `idle` | the task has no turns yet | `send` the first brief |
 
+In the app's default mode Codex can't open a question (`request_user_input` is unavailable there), so it usually ends the turn with the question in `final_message`. Read the final message for questions before treating a `completed` turn as done.
+
 Detection limits: approval requests and running commands are visible only while the app has the task loaded. They're checked while Codex is silent, about 15 s into a silence and then at widening intervals of up to 60 s. `status` reports this under `limits`. A missing or uncertain state is not evidence that nothing is waiting on the user. Run `status`. The relay can't tell a slow model from a stalled service. After several minutes of silence in `working`, tell the user instead of retrying on your own.
 
 ## Control rules
@@ -62,6 +64,18 @@ Detection limits: approval requests and running commands are visible only while 
 ## Observing versus pausing
 
 `--progress` (on `wait`, or on `new`/`send`/`steer` with `--wait`) returns at the next Codex message. That message is progress, not necessarily a plan, and Codex keeps working. To actually pause for review, write it into the brief ("stop after the plan and report"). The turn then completes, you review it, and you `send` the go-ahead.
+
+## Goals
+
+A goal keeps Codex working on one objective across turns, without a new brief each turn, until the objective is met or the budget runs out. Use one when the user wants long work finished end to end. Codex sets the goal itself, so put it in the brief: `First call create_goal with objective "<the outcome and its Done when>" and token_budget <n>.` Always set a budget.
+
+- While the goal is active, Codex starts the next turn on its own about 25 ms after the last one ends. `wait` follows those turns and returns when the goal ends, at a new message with `--progress`, or at the timeout.
+- Results carry `goal` (`status`, `objective`, `tokens_used`, `token_budget`) while a goal exists. Codex deletes a goal once it is complete, so `completed` with no `goal` field means it finished. `blocked`, `usage_limited` and `budget_limited` mean Codex stopped on its own. Report the status to the user.
+- `interrupt` pauses the goal. Codex cannot replace or close a paused, unfinished goal, so the task can't take a new goal until the user resumes or clears it in the app. For new goal work after an interrupt, start a new task.
+
+## Looking across tasks
+
+To see everything Codex is doing, as an advisor or before choosing a task to adopt, run `RELAY list --all`. It reads the app's own thread table, so it is fast even with very large threads. Each row gives the title, state, model, effort, folder and goal. `--subagents` adds the sub-agent threads with their `parent` and `nickname`, and `--limit` sets how many rows. `list` only reads, so it works on any task. Follow up with `status <task>` for detail. `status` asks the app for a live snapshot while a turn is open, which is heavy on very large threads. Add `--rollout-only` for a light read.
 
 ## Recovery
 
