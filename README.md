@@ -154,6 +154,10 @@ Not tested:
 - **Interrupting pauses a goal.** Codex can't replace or close a paused goal, so that task can't take a new one until you resume or clear the goal in the app.
 - **App updates can break it.** When an update changes the protocol, commands that talk to the app stop with `incompatible_app` instead of guessing. `doctor` shows what changed.
 
+## Roadmap
+
+Untested leads for the next version, starting with OpenAI's dots, are in [`ROADMAP.md`](ROADMAP.md).
+
 ## Disclaimer
 
 This is an unofficial project, not affiliated with or endorsed by OpenAI or Anthropic. ChatGPT and Codex are trademarks of OpenAI, and Claude is a trademark of Anthropic. The relay depends on an undocumented part of the ChatGPT desktop app that OpenAI can change at any time.
